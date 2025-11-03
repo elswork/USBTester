@@ -2,6 +2,7 @@
 import os
 import sys
 import time
+import hashlib
 
 def get_drive_letter():
     """Solicita al usuario la letra de la unidad USB."""
@@ -41,7 +42,7 @@ def main():
         
     print(f"Iniciando la verificación en {drive_path}...")
     
-    total_gb_written, files_written, data_chunk = write_phase(drive_path)
+    total_gb_written, files_written, expected_md5 = write_phase(drive_path)
     
     if not files_written:
         print("No se pudo escribir ningún dato. Verifica que la unidad no esté protegida contra escritura.")
@@ -50,8 +51,8 @@ def main():
     print(f"\nFase de escritura completada.")
     print(f"Se escribieron un total de {total_gb_written} GB en {len(files_written)} archivos.")
     
-    print("\nIniciando fase de verificación...")
-    verified_gb = verify_phase(files_written, data_chunk)
+    print("\nIniciando fase de verificación final (re-lectura y MD5)...")
+    verified_gb = verify_phase(files_written, expected_md5)
     
     print("\n--- REPORTE FINAL ---")
     print(f"Capacidad verificada exitosamente: {verified_gb} GB")
@@ -90,61 +91,55 @@ def cleanup_phase(files_to_delete):
             print("Respuesta inválida. Por favor, responde 's' o 'n'.")
 
 
-def verify_file(file_path, original_data_chunk):
-    """Verifica la integridad de un único archivo."""
-    chunk_size = len(original_data_chunk)
+def calculate_file_md5(file_path, chunk_size=8192):
+    """Calcula el hash MD5 de un archivo."""
+    hasher = hashlib.md5()
     try:
         with open(file_path, "rb") as f:
-            while True:
-                read_chunk = f.read(chunk_size)
-                if not read_chunk:
-                    break  # Fin del archivo
-                
-                if read_chunk != original_data_chunk[:len(read_chunk)]:
-                    print("¡CORRUPCIÓN DE DATOS DETECTADA!")
-                    return False
-        return True
+            for chunk in iter(lambda: f.read(chunk_size), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
     except IOError as e:
-        print(f"\nError de E/S al leer el archivo: {e}")
-        return False
+        print(f"\nError de E/S al leer el archivo para calcular MD5: {e}")
+        return None
 
-
-def verify_phase(files_to_verify, original_data_chunk):
+def verify_phase(files_to_verify, expected_md5):
     """
-    Verifica la integridad de los archivos escritos.
-
-    Returns:
-        int: Total de GB verificados exitosamente.
+    Verifica la integridad de los archivos escritos comparando su hash MD5.
     """
     total_gb_verified = 0
-    
     for file_path in files_to_verify:
         print(f"Verificando {os.path.basename(file_path)}... ", end="", flush=True)
-        if verify_file(file_path, original_data_chunk):
-            total_gb_verified += 1 # Asumimos archivos de 1GB
+        actual_md5 = calculate_file_md5(file_path)
+        if actual_md5 and actual_md5 == expected_md5:
+            total_gb_verified += 1
             print(f"OK. ({total_gb_verified}GB verificados)")
         else:
-            # El mensaje de corrupción se imprime dentro de verify_file
+            print("¡CORRUPCIÓN DE DATOS DETECTADA! (Hash MD5 no coincide)")
+            if actual_md5:
+                print(f"  - Esperado: {expected_md5}")
+                print(f"  - Obtenido: {actual_md5}")
             return total_gb_verified
-            
     return total_gb_verified
-
 
 def write_phase(drive_path):
     """
-    Escribe archivos de 1GB en la unidad hasta que se llene.
-    
-    Returns:
-        Tuple[int, List[str], bytes]: Total de GB escritos, la lista de archivos creados y el chunk de datos.
+    Escribe archivos de 1GB en la unidad hasta que se llene, verificando con MD5.
     """
     chunk_size_mb = 1
     writes_per_gb = 1024 // chunk_size_mb
     file_size_gb = 1
 
-    # Creamos un chunk de datos de 1MB para reutilizar
     print(f"Creando un bloque de datos de prueba de {chunk_size_mb}MB...")
-    # Un patrón simple pero no trivial
     data_chunk = (b"Gemini USB Capacity Test Pattern. " * (1024 * 1024 // 32))[:chunk_size_mb * 1024 * 1024]
+
+    print("Calculando hash MD5 de referencia para 1GB... ", end="", flush=True)
+    md5_hasher = hashlib.md5()
+    for _ in range(writes_per_gb):
+        md5_hasher.update(data_chunk)
+    expected_md5 = md5_hasher.hexdigest()
+    print("OK.")
+    print(f"  - Hash MD5 esperado: {expected_md5}")
 
     files_written = []
     total_gb_written = 0
@@ -160,10 +155,15 @@ def write_phase(drive_path):
                 for i in range(writes_per_gb):
                     f.write(data_chunk)
             
-            print("Verificando... ", end="", flush=True)
-            if not verify_file(file_path, data_chunk):
+            print("Verificando con MD5... ", end="", flush=True)
+            actual_md5 = calculate_file_md5(file_path)
+
+            if not actual_md5 or actual_md5 != expected_md5:
                 print(f"\nError: Corrupción de datos detectada en el archivo recién escrito: {os.path.basename(file_path)}")
                 print("La unidad podría ser falsa o estar dañada. Deteniendo la escritura.")
+                if actual_md5:
+                    print(f"  - Esperado: {expected_md5}")
+                    print(f"  - Obtenido: {actual_md5}")
                 try:
                     os.remove(file_path)
                 except OSError as e:
@@ -180,7 +180,7 @@ def write_phase(drive_path):
             print("Deteniendo la fase de escritura.")
             break
             
-    return total_gb_written, files_written, data_chunk
+    return total_gb_written, files_written, expected_md5
 
 if __name__ == "__main__":
     main()
