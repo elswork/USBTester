@@ -41,7 +41,7 @@ def main():
         
     print(f"Iniciando la verificación en {drive_path}...")
     
-    total_gb_written, files_written = write_phase(drive_path)
+    total_gb_written, files_written, data_chunk = write_phase(drive_path)
     
     if not files_written:
         print("No se pudo escribir ningún dato. Verifica que la unidad no esté protegida contra escritura.")
@@ -67,6 +67,7 @@ def main():
 
     print("\nProceso finalizado.")
 
+
 def cleanup_phase(files_to_delete):
     """Pregunta al usuario si desea eliminar los archivos de prueba."""
     print("\n" + "-"*50)
@@ -88,6 +89,26 @@ def cleanup_phase(files_to_delete):
         else:
             print("Respuesta inválida. Por favor, responde 's' o 'n'.")
 
+
+def verify_file(file_path, original_data_chunk):
+    """Verifica la integridad de un único archivo."""
+    chunk_size = len(original_data_chunk)
+    try:
+        with open(file_path, "rb") as f:
+            while True:
+                read_chunk = f.read(chunk_size)
+                if not read_chunk:
+                    break  # Fin del archivo
+                
+                if read_chunk != original_data_chunk[:len(read_chunk)]:
+                    print("¡CORRUPCIÓN DE DATOS DETECTADA!")
+                    return False
+        return True
+    except IOError as e:
+        print(f"\nError de E/S al leer el archivo: {e}")
+        return False
+
+
 def verify_phase(files_to_verify, original_data_chunk):
     """
     Verifica la integridad de los archivos escritos.
@@ -96,40 +117,25 @@ def verify_phase(files_to_verify, original_data_chunk):
         int: Total de GB verificados exitosamente.
     """
     total_gb_verified = 0
-    chunk_size = len(original_data_chunk)
     
     for file_path in files_to_verify:
         print(f"Verificando {os.path.basename(file_path)}... ", end="", flush=True)
-        try:
-            with open(file_path, "rb") as f:
-                while True:
-                    read_chunk = f.read(chunk_size)
-                    if not read_chunk:
-                        break # Fin del archivo
-                    
-                    if read_chunk != original_data_chunk:
-                        print("¡CORRUPCIÓN DE DATOS DETECTADA!")
-                        # Podríamos querer saber cuántos chunks se leyeron bien en este archivo
-                        # pero para simplificar, si un archivo falla, no contamos su GB.
-                        return total_gb_verified
-            
-            # Si el bucle termina sin corrupción, el archivo está OK.
+        if verify_file(file_path, original_data_chunk):
             total_gb_verified += 1 # Asumimos archivos de 1GB
             print(f"OK. ({total_gb_verified}GB verificados)")
-
-        except IOError as e:
-            print(f"\nError de E/S al leer el archivo: {e}")
-            print("La verificación no puede continuar.")
+        else:
+            # El mensaje de corrupción se imprime dentro de verify_file
             return total_gb_verified
             
     return total_gb_verified
+
 
 def write_phase(drive_path):
     """
     Escribe archivos de 1GB en la unidad hasta que se llene.
     
     Returns:
-        Tuple[int, List[str]]: Total de GB escritos y la lista de archivos creados.
+        Tuple[int, List[str], bytes]: Total de GB escritos, la lista de archivos creados y el chunk de datos.
     """
     chunk_size_mb = 1
     writes_per_gb = 1024 // chunk_size_mb
@@ -154,6 +160,16 @@ def write_phase(drive_path):
                 for i in range(writes_per_gb):
                     f.write(data_chunk)
             
+            print("Verificando... ", end="", flush=True)
+            if not verify_file(file_path, data_chunk):
+                print(f"\nError: Corrupción de datos detectada en el archivo recién escrito: {os.path.basename(file_path)}")
+                print("La unidad podría ser falsa o estar dañada. Deteniendo la escritura.")
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    print(f"No se pudo eliminar el archivo corrupto: {e}")
+                break
+
             files_written.append(file_path)
             total_gb_written += file_size_gb
             print(f"OK. ({total_gb_written}GB en total)")
@@ -164,7 +180,7 @@ def write_phase(drive_path):
             print("Deteniendo la fase de escritura.")
             break
             
-    return total_gb_written, files_written
+    return total_gb_written, files_written, data_chunk
 
 if __name__ == "__main__":
     main()
